@@ -1,0 +1,7 @@
+name = "AugLag"
+uuid = "00e8f567-5ab8-4b4d-b776-660e3e797dc4"
+authors = ["HiroIshida <spitfire.docomo@gmail.com>"]
+version = "0.1.0"
+
+[deps]
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
