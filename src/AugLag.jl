@@ -131,23 +131,24 @@ function compute_auglag_grad(prob::Problem, ad::AuglagData, fe::FuncEvals)
     # compute gradient of the augmented lagrangian
     grad_lag = fe.grad_obj
     for i in 1:prob.n_dim_ceq
-        grad_ineq_lag_mult = ad.lambda_ceq[i] * fe.grad_ceq[:, i]
-        grad_ineq_quadratic_penalty = ad.mu_ceq/2.0 * 2 * fe.val_ceq[i] * fe.grad_ceq[:, i]
+        grad_ineq_lag_mult = ad.lambda_ceq[i] * @views fe.grad_ceq[:, i]
+        grad_ineq_quadratic_penalty = ad.mu_ceq/2.0 * 2 * fe.val_ceq[i] * @views fe.grad_ceq[:, i]
         grad_lag += (- grad_ineq_lag_mult + grad_ineq_quadratic_penalty)
     end
     for i in 1:prob.n_dim_cineq
-        grad_lag += psi_grad(fe.val_cineq[i], ad.lambda_cineq[i], ad.mu_cineq) * fe.grad_cineq[:, i]
+        grad_lag += psi_grad(fe.val_cineq[i], ad.lambda_cineq[i], ad.mu_cineq) * @views fe.grad_cineq[:, i]
     end
     return grad_lag
 end
 
 function compute_auglag_approximate_hessian(prob::Problem, ad::AuglagData, fe::FuncEvals)
     approx_hessian = prob.qm.hessian
+    # TODO a matrix created by vec^T * vec can be expressed in a better data structure
     for i in 1:prob.n_dim_ceq
-        approx_hessian += 0.5 * ad.mu_ceq * fe.grad_ceq[:, i] * transpose(fe.grad_ceq[:, i])
+        approx_hessian += 0.5 * ad.mu_ceq * @views fe.grad_ceq[:, i] * transpose(@views fe.grad_ceq[:, i])
     end
     for i in 1:prob.n_dim_cineq
-        approx_hessian += 0.5 * ad.mu_cineq * fe.grad_cineq[:, i] * transpose(fe.grad_cineq[:, i]) 
+        approx_hessian += 0.5 * ad.mu_cineq * @views fe.grad_cineq[:, i] * transpose(@views fe.grad_cineq[:, i]) 
     end
     return approx_hessian
 end
