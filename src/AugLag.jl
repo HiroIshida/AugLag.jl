@@ -64,6 +64,14 @@ mutable struct AuglagData
     lambda_cineq::Vector{Float64}
     mu_ceq::Float64
     mu_cineq::Float64
+
+    # cache
+    val_obj::Float64
+    grad_obj::Vector{Float64}
+    val_ceq::Vector{Float64}
+    grad_ceq::Matrix{Float64}
+    val_cineq::Vector{Float64}
+    grad_cineq::Matrix{Float64}
 end
 
 # we will consider a model with quadratic objective function with 
@@ -83,7 +91,16 @@ function gen_init_data(prob::Problem)
     lambda_cineq = zeros(prob.n_dim_cineq)
     mu_ceq = 1.0
     mu_cineq = 1.0
-    AuglagData(lambda_ceq, lambda_cineq, mu_ceq, mu_cineq)
+    AuglagData(lambda_ceq, lambda_cineq, mu_ceq, mu_cineq,
+        0.0, zeros(prob.n_dim),
+        zeros(prob.n_dim_ceq), zeros(prob.n_dim, prob.n_dim_ceq),
+        zeros(prob.n_dim_cineq), zeros(prob.n_dim, prob.n_dim_cineq))
+end
+
+function evaluate!(x::Vector{Float64}, prob::Problem, ad::AuglagData)
+    ad.val_obj, ad.grad_obj = prob.qm(x)
+    ad.val_ceq, ad.grad_ceq = prob.ceq(x)
+    ad.val_cineq, ad.grad_cineq = prob.cineq(x)
 end
 
 function Problem(qm::QuadraticModel, ceq, cineq, n_dim)
@@ -100,52 +117,57 @@ function Problem(qm::QuadraticModel, ceq, cineq, n_dim)
     Problem(qm, ceq, cineq, n_dim, n_dim_ceq, n_dim_cineq)
 end
 
-function compute_auglag(x::Vector{Float64}, prob::Problem, ad::AuglagData) 
-    val_obj, grad_obj = prob.qm(x)
-    val_ceq, grad_ceq = prob.ceq(x)
-    val_cineq, grad_cineq = prob.cineq(x)
-
+function compute_auglag(prob::Problem, ad::AuglagData) 
     # compute function evaluation of the augmented lagrangian
-    val_lag = val_obj
+    val_lag = ad.val_obj
     for i in 1:prob.n_dim_ceq
-        ineq_lag_mult = ad.lambda_ceq[i] * val_ceq[i]
-        ineq_quadratic_penalty = ad.mu_ceq/2.0 * val_ceq[i]^2
+        ineq_lag_mult = ad.lambda_ceq[i] * ad.val_ceq[i]
+        ineq_quadratic_penalty = ad.mu_ceq/2.0 * ad.val_ceq[i]^2
         val_lag += (- ineq_lag_mult + ineq_quadratic_penalty)
     end
     for i in 1:prob.n_dim_cineq
-        val_lag += psi(val_cineq[i], ad.lambda_cineq[i], ad.mu_cineq)
+        val_lag += psi(ad.val_cineq[i], ad.lambda_cineq[i], ad.mu_cineq)
     end
+    return val_lag
+end
 
+function compute_auglag_grad(prob::Problem, ad::AuglagData)
     # compute gradient of the augmented lagrangian
-    grad_lag = grad_obj
+    grad_lag = ad.grad_obj
     for i in 1:prob.n_dim_ceq
-        grad_ineq_lag_mult = ad.lambda_ceq[i] * grad_ceq[:, i]
-        grad_ineq_quadratic_penalty = ad.mu_ceq/2.0 * 2 * val_ceq[i] * grad_ceq[:, i]
+        grad_ineq_lag_mult = ad.lambda_ceq[i] * ad.grad_ceq[:, i]
+        grad_ineq_quadratic_penalty = ad.mu_ceq/2.0 * 2 * ad.val_ceq[i] * ad.grad_ceq[:, i]
         grad_lag += (- grad_ineq_lag_mult + grad_ineq_quadratic_penalty)
     end
     for i in 1:prob.n_dim_cineq
-        grad_lag += psi_grad(val_cineq[i], ad.lambda_cineq[i], ad.mu_cineq) * grad_cineq[:, i]
+        grad_lag += psi_grad(ad.val_cineq[i], ad.lambda_cineq[i], ad.mu_cineq) * ad.grad_cineq[:, i]
     end
+    return grad_lag
+end
 
-    # compute approximate hessian of augmented lagrangian 
+function compute_auglag_hessian(prob::Problem, ad::AuglagData)
     approx_hessian = prob.qm.hessian
     for i in 1:prob.n_dim_ceq
-        approx_hessian += 0.5 * ad.mu_ceq * grad_ceq[:, i] * transpose(grad_ceq[:, i])
+        approx_hessian += 0.5 * ad.mu_ceq * ad.grad_ceq[:, i] * transpose(ad.grad_ceq[:, i])
     end
     for i in 1:prob.n_dim_cineq
-        approx_hessian += 0.5 * ad.mu_cineq * grad_cineq[:, i] * transpose(grad_cineq[:, i]) 
+        approx_hessian += 0.5 * ad.mu_cineq * ad.grad_cineq[:, i] * transpose(ad.grad_cineq[:, i]) 
     end
-
-    return val_lag, grad_lag, approx_hessian
+    return approx_hessian
 end
 
 function step_auglag(x::Vector{Float64}, prob::Problem, ad::AuglagData)
-    for _ in 1:10
+    for _ in 1:100
+        evaluate!(x, prob, ad)
         # newton step
-        val_lag, grad_lag, hessian_lag = compute_auglag(x, prob, ad)
+        val_lag = compute_auglag(prob, ad)
+        grad_lag = compute_auglag_grad(prob, ad)
+        hessian_lag = compute_auglag_hessian(prob, ad)
+
+        # compute approx hessian
         qm = QuadraticModel(val_lag, grad_lag, hessian_lag)
         direction = newton_direction(x, qm)
-        x += direction * 0.5
+        x += direction * 0.01
     end
 
     val_obj, grad_obj = prob.qm(x)
