@@ -7,17 +7,24 @@ qm = QuadraticModel(0.0, [0, 0], Diagonal([1, 1.]))
 
 function eq_const(x::Vector{Float64})
     val = (x[1] - 1.0)^2 - x[2]
-    grad = transpose([2 * x[1] -1.0;])
-    return val, grad
+    grad = transpose([2 * (x[1] - 1.0) -1.0;])
+    return [val], grad
 end
 
 function ineq_const(x::Vector{Float64})
-    val = x[1] - x[2]
+    val = (x[1] - 1.0) - x[2]
     grad = transpose([1. -1.;])
-    return val, grad
+    return [val], grad
 end
 
-prob = Problem(qm, eq_const, ineq_const, 2, 1, 1)
-x_init = [5.5, 5.0]
-internal_data = gen_init_data(prob, x_init)
-step_auglag(prob, internal_data)
+function main()
+    prob = Problem(qm, eq_const, ineq_const, 2)
+    x_opt = [2.0, 2.0]
+    internal_data = gen_init_data(prob)
+    for i in 1:10
+        x_opt = step_auglag(x_opt, prob, internal_data)
+        println(x_opt)
+        println(internal_data)
+    end
+end
+main()

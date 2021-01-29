@@ -9,13 +9,26 @@ debugging() = false
 
 using LinearAlgebra
 
+function numerical_grad(fun, x0)
+    eps = 1e-7
+    dim = length(x0)
+    grad_numel = zeros(dim)
+    for i in 1:dim
+        x1 = copy(x0)
+        x1[i] += eps
+        grad_numel[i] = (fun(x1) - fun(x0))/eps
+    end
+    return grad_numel
+end
+
 struct QuadraticModel
     f::Float64
     grad::Vector{Float64}
     hessian::Matrix{Float64}
 end
 
-function newton_direction(qm::QuadraticModel)
+function newton_direction(x::Vector{Float64}, qm::QuadraticModel)
+    alpha = 1.0
     param_damping = 1.0 # Levenberg–Marquardt damping
     inv_hessian = inv(qm.hessian .+ param_damping)
     d = - inv_hessian * qm.grad
@@ -47,7 +60,6 @@ function psi_grad(t::Float64, sigma::Float64, mu::Float64)
 end
 
 mutable struct AuglagData
-    x::Vector{Float64} # current estimate for the solution
     lambda_ceq::Vector{Float64}
     lambda_cineq::Vector{Float64}
     mu_ceq::Float64
@@ -66,15 +78,15 @@ struct Problem
     n_dim_cineq::Int
 end
 
-function gen_init_data(prob::Problem, x)
+function gen_init_data(prob::Problem)
     lambda_ceq = zeros(prob.n_dim_ceq)
     lambda_cineq = zeros(prob.n_dim_cineq)
     mu_ceq = 1.0
     mu_cineq = 1.0
-    AuglagData(x, lambda_ceq, lambda_cineq, mu_ceq, mu_cineq)
+    AuglagData(lambda_ceq, lambda_cineq, mu_ceq, mu_cineq)
 end
 
-function Problem(qm::QuadraticModel, cineq, ceq, n_dim)
+function Problem(qm::QuadraticModel, ceq, cineq, n_dim)
     x_dummy = zeros(n_dim)
     val_ceq, jac_ceq = ceq(x_dummy)
     n_dim_ceq = length(val_ceq)
@@ -85,22 +97,22 @@ function Problem(qm::QuadraticModel, cineq, ceq, n_dim)
     n_dim_cineq = length(val_cineq)
     @assert size(jac_cineq) == (n_dim, n_dim_cineq)
 
-    Problem(qm, cineq, ceq, n_dim, n_dim_cineq, n_dim_ceq)
+    Problem(qm, ceq, cineq, n_dim, n_dim_ceq, n_dim_cineq)
 end
 
-function compute_auglag(prob::Problem, ad::AuglagData) 
-    val_obj, grad_obj = prob.qm(ad.x)
-    val_ceq, grad_ceq = prob.ceq(ad.x)
-    val_cineq, grad_cineq = prob.cineq(ad.x)
+function compute_auglag(x::Vector{Float64}, prob::Problem, ad::AuglagData) 
+    val_obj, grad_obj = prob.qm(x)
+    val_ceq, grad_ceq = prob.ceq(x)
+    val_cineq, grad_cineq = prob.cineq(x)
 
     # compute function evaluation of the augmented lagrangian
     val_lag = val_obj
-    for i in 1:length(ad.lambda_ceq)
+    for i in 1:prob.n_dim_ceq
         ineq_lag_mult = ad.lambda_ceq[i] * val_ceq[i]
         ineq_quadratic_penalty = ad.mu_ceq/2.0 * val_ceq[i]^2
         val_lag += (- ineq_lag_mult + ineq_quadratic_penalty)
     end
-    for i in 1:length(ad.lambda_cineq)
+    for i in 1:prob.n_dim_cineq
         val_lag += psi(val_cineq[i], ad.lambda_cineq[i], ad.mu_cineq)
     end
 
@@ -127,33 +139,28 @@ function compute_auglag(prob::Problem, ad::AuglagData)
     return val_lag, grad_lag, approx_hessian
 end
 
-function step_auglag(prob::Problem, ad::AuglagData)
-    for i in 1:20
-        println("==================")
-        for _ in 1:10
-            # newton step
-            val_lag, grad_lag, hessian_lag = compute_auglag(prob, ad)
-            qm = QuadraticModel(val_lag, grad_lag, hessian_lag)
-            direction = newton_direction(qm)
-            ad.x += direction
-            println(val_lag)
-        end
-
-        val_obj, grad_obj = prob.qm(ad.x)
-        val_ceq, grad_ceq = prob.ceq(ad.x)
-        val_cineq, grad_cineq = prob.cineq(ad.x)
-        for j in 1:prob.n_dim_ceq
-            ad.lambda_ceq[j] -= ad.mu_ceq * val_ceq[j]
-        end
-        for j in 1:prob.n_dim_cineq
-            ad.lambda_cineq[j] = max(0.0, ad.lambda_cineq[j] - ad.mu_cineq * val_cineq[j])
-        end
-        println(ad)
-
-
-        ad.mu_ceq *= 5.0
-        ad.mu_cineq *= 5.0
+function step_auglag(x::Vector{Float64}, prob::Problem, ad::AuglagData)
+    for _ in 1:10
+        # newton step
+        val_lag, grad_lag, hessian_lag = compute_auglag(x, prob, ad)
+        qm = QuadraticModel(val_lag, grad_lag, hessian_lag)
+        direction = newton_direction(x, qm)
+        x += direction * 0.5
     end
+
+    val_obj, grad_obj = prob.qm(x)
+    val_ceq, grad_ceq = prob.ceq(x)
+    val_cineq, grad_cineq = prob.cineq(x)
+    for j in 1:prob.n_dim_ceq
+        ad.lambda_ceq[j] -= ad.mu_ceq * val_ceq[j]
+    end
+    for j in 1:prob.n_dim_cineq
+        ad.lambda_cineq[j] = max(0.0, ad.lambda_cineq[j] - ad.mu_cineq * val_cineq[j])
+    end
+
+    ad.mu_ceq *= 5.0
+    ad.mu_cineq *= 5.0
+    return x
 end
 
 export QuadraticModel, AuglagData, Problem, compute_auglag, gen_init_data, step_auglag
