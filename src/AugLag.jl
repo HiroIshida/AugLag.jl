@@ -28,7 +28,7 @@ struct QuadraticModel
 end
 
 function newton_direction(x::Vector{Float64}, qm::QuadraticModel)
-    param_damping = 0.0 # Levenberg–Marquardt damping
+    param_damping = 1.0 # Levenberg–Marquardt damping
     inv_hessian = inv(qm.hessian .+ param_damping)
     d = - inv_hessian * qm.grad
 end
@@ -170,13 +170,13 @@ function compute_auglag_numerical_hessian(x::Vector{Float64}, prob::Problem, ad:
     return H
 end
 
-function step_auglag(x::Vector{Float64}, prob::Problem, ad::AuglagData)
+function step_auglag(x::Vector{Float64}, prob::Problem, ad::AuglagData, xtol_internal::Float64)
     alpha_newton = 1.0
     sigma_alpha_update_minus = 0.5
     sigma_alpha_update_plus = 1.2
     sigma_line_search = 0.01
 
-    for _ in 1:20
+    while true
         fe = FuncEvals(x, prob)
         # newton step
         val_lag = compute_auglag(prob, ad, fe)
@@ -194,8 +194,7 @@ function step_auglag(x::Vector{Float64}, prob::Problem, ad::AuglagData)
             @debugassert dot(direction, grad_lag) < 0
         end
 
-        itr_counter = 1
-        for i in 1:20
+        while true
             x_new = x + direction * alpha_newton
             fe_new = FuncEvals(x_new, prob)
             val_lag_new = compute_auglag(prob, ad, fe_new)
@@ -203,13 +202,11 @@ function step_auglag(x::Vector{Float64}, prob::Problem, ad::AuglagData)
             isValidAlpha = val_lag_new < val_lag + sigma_line_search * dot(grad_lag, alpha_newton * direction)
             isValidAlpha && break
             alpha_newton *= sigma_alpha_update_minus
-            itr_counter += 1
-            if itr_counter > 20
-                #throw(Exception)
-            end
         end
-        x += alpha_newton * direction
+        dx = alpha_newton * direction
+        x += dx
         alpha_newton = min(sigma_alpha_update_plus * alpha_newton, 1.0)
+        maximum(abs.(dx)) < xtol_internal && break
     end
 
     val_obj, grad_obj = prob.qm(x)
