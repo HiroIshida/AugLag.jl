@@ -1,4 +1,5 @@
 using AugLag
+using BenchmarkTools
 using LinearAlgebra
 using Test
 import JSON
@@ -7,28 +8,71 @@ AugLag.debugging() = true
 
 # the test data set (mpc.json) is created using 
 # https://github.com/HiroIshida/robust-tube-mpc
-function solve_mpc()
+f = open("../data/mpc.json", "r")
+qpdata = JSON.parse(read(f, String))
+close(f)
 
-    f = open("../data/mpc.json", "r")
-    qpdata = JSON.parse(read(f, String))
-    close(f)
+function parse_json_matrix(json)
+    n = length(json)
+    m = length(json[1])
+    mat = zeros(Float64, n, m)
+    for i in 1:n
+        mat[i, :] = json[i]
+    end
+    return mat
+end
 
-    function parse_json_matrix(json)
-        n = length(json)
-        m = length(json[1])
-        mat = zeros(Float64, n, m)
-        for i in 1:n
-            mat[i, :] = json[i]
+C_ineq1 = parse_json_matrix(qpdata["C_ineq1"])
+C_ineq2 = Vector{Float64}(qpdata["C_ineq2"])
+C_eq1 = parse_json_matrix(qpdata["C_eq1"])
+C_eq2 = Vector{Float64}(qpdata["C_eq2"])
+H = parse_json_matrix(qpdata["H"])
+sol = Vector{Float64}(qpdata["sol"])
+
+using NLopt
+
+function solve_mpc_nlopt(H, C_ineq1, C_ineq2, C_eq1, C_eq2, sol)
+
+    dim = size(H)[1]
+    qm = QuadraticModel(0.0, zeros(dim), H)
+
+    function objective(x::Vector, grad::Vector)
+        val, grad_ = qm(x)
+        if length(grad) > 0
+            grad[:] = grad_
         end
-        return mat
+        return val
     end
 
-    C_ineq1 = parse_json_matrix(qpdata["C_ineq1"])
-    C_ineq2 = Vector{Float64}(qpdata["C_ineq2"])
-    C_eq1 = parse_json_matrix(qpdata["C_eq1"])
-    C_eq2 = Vector{Float64}(qpdata["C_eq2"])
-    H = parse_json_matrix(qpdata["H"])
-    sol = Vector{Float64}(qpdata["sol"])
+    function eq_const(x::Vector, grad::Vector)
+        println("hoge")
+        val = C_eq2 - C_eq1 * x
+        if length(grad) > 0
+            println(grad)
+            println("hage")
+            grad[:] = - vec(C_eq1)
+        end
+        return val
+    end
+
+    function ineq_const(x::Vector, grad::Vector)
+        val = C_ineq2 - C_ineq1 * x
+        if length(grad) > 0
+            grad = - C_ineq1
+        end
+        return val
+    end
+
+    x_opt = ones(dim)
+    opt = Opt(:LD_SLSQP, dim)
+    opt.min_objective = objective
+    #opt.inequality_constraint = ineq_const
+    #opt.equality_constraint = eq_const
+    opt.xtol_abs = 1e-3
+    optimize(opt, x_opt)
+end
+
+function solve_mpc(H, C_ineq1, C_ineq2, C_eq1, C_eq2, sol)
 
     dim = size(H)[1]
     qm = QuadraticModel(0.0, zeros(dim), H)
@@ -61,4 +105,6 @@ function solve_mpc()
     @test maximum(abs.(x_opt - sol)) < 1e-4
     println("mpc solved")
 end
-solve_mpc()
+
+@benchmark solve_mpc(H, C_ineq1, C_ineq2, C_eq1, C_eq2, sol)
+@benchmark solve_mpc_nlopt(H, C_ineq1, C_ineq2, C_eq1, C_eq2, sol)
