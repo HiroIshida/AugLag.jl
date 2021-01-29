@@ -2,7 +2,7 @@ using Revise
 using AugLag
 using LinearAlgebra
 
-AugLag.debugging() = false
+AugLag.debugging() = true
 qm = QuadraticModel(0.0, [0, 0], Diagonal([1, 1.]))
 
 function eq_const(x::Vector{Float64})
@@ -21,7 +21,7 @@ function main()
     prob = Problem(qm, eq_const, ineq_const, 2)
     x_opt = [2.0, 2.0]
     internal_data = gen_init_data(prob)
-    for i in 1:10
+    for i in 1:100
         x_opt = step_auglag(x_opt, prob, internal_data)
         println(x_opt)
         println(internal_data)
