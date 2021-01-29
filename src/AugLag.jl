@@ -28,7 +28,7 @@ struct QuadraticModel
 end
 
 function newton_direction(x::Vector{Float64}, qm::QuadraticModel)
-    param_damping = 0.1 # Levenberg–Marquardt damping
+    param_damping = 0.0 # Levenberg–Marquardt damping
     inv_hessian = inv(qm.hessian .+ param_damping)
     d = - inv_hessian * qm.grad
 end
@@ -40,19 +40,16 @@ function (qm::QuadraticModel)(x::Vector{Float64})
 end
 
 function psi(t::Float64, sigma::Float64, mu::Float64)
-    if t - mu * sigma < 0.0
-        val = - sigma * t + 1/(2*mu) * t^2
-        return val
+    if t - sigma/mu < 0.0
+        return - sigma * t + 0.5 * mu * t^2
     else
-        val = -0.5 * mu * sigma
-        return val
+        return - 0.5/mu * sigma^2
     end
 end
 
 function psi_grad(t::Float64, sigma::Float64, mu::Float64)
-    if t - mu * sigma < 0.0
-        grad = - sigma + 1/mu * t
-        return grad
+    if t - sigma/mu < 0.0
+        return - sigma + mu * t
     else
         return 0.0
     end
@@ -144,7 +141,7 @@ function compute_auglag_grad(prob::Problem, ad::AuglagData, fe::FuncEvals)
     return grad_lag
 end
 
-function compute_auglag_hessian(prob::Problem, ad::AuglagData, fe::FuncEvals)
+function compute_auglag_approximate_hessian(prob::Problem, ad::AuglagData, fe::FuncEvals)
     approx_hessian = prob.qm.hessian
     for i in 1:prob.n_dim_ceq
         approx_hessian += 0.5 * ad.mu_ceq * fe.grad_ceq[:, i] * transpose(fe.grad_ceq[:, i])
@@ -153,6 +150,24 @@ function compute_auglag_hessian(prob::Problem, ad::AuglagData, fe::FuncEvals)
         approx_hessian += 0.5 * ad.mu_cineq * fe.grad_cineq[:, i] * transpose(fe.grad_cineq[:, i]) 
     end
     return approx_hessian
+end
+
+function compute_auglag_numerical_hessian(x::Vector{Float64}, prob::Problem, ad::AuglagData)
+    x0 = x
+    fe0 = FuncEvals(x, prob)
+    grad_lag0 = compute_auglag_grad(prob, ad, fe0)
+
+    dim = length(x0)
+    H = zeros(dim, dim)
+    eps = 1e-7
+    for i in 1:length(x)
+        x1 = copy(x0)
+        x1[i] += eps
+        fe1 = FuncEvals(x1, prob)
+        grad_lag1 = compute_auglag_grad(prob, ad, fe1)
+        H[:, i] = (grad_lag1 - grad_lag0)/eps
+    end
+    return H
 end
 
 function step_auglag(x::Vector{Float64}, prob::Problem, ad::AuglagData)
@@ -166,15 +181,21 @@ function step_auglag(x::Vector{Float64}, prob::Problem, ad::AuglagData)
         # newton step
         val_lag = compute_auglag(prob, ad, fe)
         grad_lag = compute_auglag_grad(prob, ad, fe)
-        hessian_lag = compute_auglag_hessian(prob, ad, fe)
+
+        fun(x) = compute_auglag(prob, ad, FuncEvals(x, prob)) 
+        num_grad = numerical_grad(fun, x)
+        hessian_lag_approx = compute_auglag_approximate_hessian(prob, ad, fe)
+        #hessian_lag_approx = compute_auglag_numerical_hessian(x, prob, ad) 
 
         # compute approx hessian
-        qm = QuadraticModel(val_lag, grad_lag, hessian_lag)
+        qm = QuadraticModel(val_lag, grad_lag, hessian_lag_approx)
         direction = newton_direction(x, qm)
-        @debugassert dot(direction, grad_lag) < 0
+        if norm(direction) > 0
+            @debugassert dot(direction, grad_lag) < 0
+        end
 
         itr_counter = 1
-        while true
+        for i in 1:20
             x_new = x + direction * alpha_newton
             fe_new = FuncEvals(x_new, prob)
             val_lag_new = compute_auglag(prob, ad, fe_new)
@@ -182,10 +203,9 @@ function step_auglag(x::Vector{Float64}, prob::Problem, ad::AuglagData)
             isValidAlpha = val_lag_new < val_lag + sigma_line_search * dot(grad_lag, alpha_newton * direction)
             isValidAlpha && break
             alpha_newton *= sigma_alpha_update_minus
-            #println(alpha_newton)
             itr_counter += 1
             if itr_counter > 20
-                throw(Exception)
+                #throw(Exception)
             end
         end
         x += alpha_newton * direction
@@ -202,8 +222,8 @@ function step_auglag(x::Vector{Float64}, prob::Problem, ad::AuglagData)
         ad.lambda_cineq[j] = max(0.0, ad.lambda_cineq[j] - ad.mu_cineq * val_cineq[j])
     end
 
-    ad.mu_ceq *= 5.0
-    ad.mu_cineq *= 5.0
+    ad.mu_ceq < 1e6 && (ad.mu_ceq *= 5.0)
+    ad.mu_cineq < 1e6 && (ad.mu_cineq *= 5.0)
     return x
 end
 
