@@ -182,11 +182,7 @@ function step_auglag(x::Vector{Float64}, prob::Problem, ad::AuglagData, xtol_int
         # newton step
         val_lag = compute_auglag(prob, ad, fe)
         grad_lag = compute_auglag_grad(prob, ad, fe)
-
-        fun(x) = compute_auglag(prob, ad, FuncEvals(x, prob)) 
-        num_grad = numerical_grad(fun, x)
         hessian_lag_approx = compute_auglag_approximate_hessian(prob, ad, fe)
-        #hessian_lag_approx = compute_auglag_numerical_hessian(x, prob, ad) 
 
         # compute approx hessian
         qm = QuadraticModel(val_lag, grad_lag, hessian_lag_approx)
