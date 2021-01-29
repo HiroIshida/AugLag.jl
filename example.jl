@@ -1,6 +1,7 @@
 using Revise
 using AugLag
 using LinearAlgebra
+using BenchmarkTools
 
 AugLag.debugging() = true
 qm = QuadraticModel(0.0, [0, 0], Diagonal([1, 1.]))
@@ -23,15 +24,13 @@ function main()
     prob = Problem(qm, eq_const, ineq_const, 2)
     x_opt = [2.0, 2.0]
     internal_data = gen_init_data(prob)
-    xtol = 1e-3
-    @time for i in 1:20
+    xtol = 1e-4
+    for i in 1:20
         x_opt_pre = x_opt
         x_opt = step_auglag(x_opt, prob, internal_data, xtol)
         if maximum(abs.(x_opt - x_opt_pre)) < xtol
             break
         end
-        println("xopt:")
-        println(x_opt)
     end
 end
-main()
+@btime main()
