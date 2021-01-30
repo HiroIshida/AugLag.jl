@@ -57,6 +57,7 @@ function nlopt_main()
     minf, minx, ret = optimize(opt, [2.0, 2.0])
 end
 
+using Profile
 function main()
     qm = QuadraticModel(0.0, [0, 0], Diagonal([1, 1.]))
     prob = Problem(qm, eq_const, ineq_const, 2)
@@ -72,6 +73,9 @@ function main()
     end
 end
 println("testing auglag")
-@benchmark main()
-println("testing nlopt slsqp")
-@benchmark nlopt_main()
+@profile main()
+open("profile.txt", "w") do io
+    Profile.print(io, mincount=10)
+end
+#println("testing nlopt slsqp")
+#@benchmark nlopt_main()
