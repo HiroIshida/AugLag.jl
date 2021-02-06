@@ -29,8 +29,8 @@ end
 
 function newton_direction(x::Vector{Float64}, qm::QuadraticModel)
     param_damping = 1.0 # Levenberg–Marquardt damping
-    inv_hessian = inv(qm.hessian .+ param_damping)
-    d = - inv_hessian * qm.grad
+    d = - (qm.hessian .+ param_damping)\qm.grad
+    return d
 end
 
 function (qm::QuadraticModel)(x::Vector{Float64})
@@ -216,8 +216,8 @@ function step_auglag(x::Vector{Float64}, prob::Problem, ad::AuglagData, xtol_int
         ad.lambda_cineq[j] = max(0.0, ad.lambda_cineq[j] - ad.mu_cineq * val_cineq[j])
     end
 
-    ad.mu_ceq < 1e6 && (ad.mu_ceq *= 5.0)
-    ad.mu_cineq < 1e6 && (ad.mu_cineq *= 5.0)
+    ad.mu_ceq < 1e8 && (ad.mu_ceq *= 10.0)
+    ad.mu_cineq < 1e8 && (ad.mu_cineq *= 10.0)
     return x
 end
 
