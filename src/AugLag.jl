@@ -20,6 +20,7 @@ function (qm::QuadraticModel)(x::Vector{Float64})
     return val, grad
 end
 
+
 struct Config
     xtol_internal::Float64
     sigma_alpha_update_minus::Float64
@@ -38,10 +39,9 @@ mutable struct Workspace
     n_dim::Int
     n_ineq::Int
     n_eq::Int
-    lambda::Vector{Float64} # g dual
-    kappa::Vector{Float64} # h dual
+    lambda_ineq::Vector{Float64} # g dual
+    lambda_eq::Vector{Float64} # h dual
     mu::Float64 # g penal
-    nu::Float64 # h penal
 
     # cache
     fval::Union{Float64, Nothing}
@@ -56,9 +56,8 @@ end
 function Workspace(n_dim, n_ineq, n_eq) 
     g_dual = zeros(n_ineq) 
     h_dual = zeros(n_eq)
-    g_penalty = 1.0
-    h_penalty = 1.0
-    Workspace(n_dim, n_ineq, n_eq, g_dual, h_dual, g_penalty, h_penalty, 
+    mu = 1.0
+    Workspace(n_dim, n_ineq, n_eq, g_dual, h_dual, mu, 
         nothing, nothing, nothing, nothing, nothing, nothing, nothing)
 end
 
@@ -69,24 +68,46 @@ function evaluate!(ws::Workspace, x, f::QuadraticModel, g, h)
     ws.fhessian = f.hessian
 end
 
+function psi(t::Float64, sigma::Float64, mu::Float64)
+    if t - sigma/mu < 0.0
+        return - sigma * t + 0.5 * mu * t^2
+    else
+        return - 0.5/mu * sigma^2
+    end
+end
+
+function psi_grad(t::Float64, sigma::Float64, mu::Float64)
+    if t - sigma/mu < 0.0
+        return - sigma + mu * t
+    else
+        return 0.0
+    end
+end
+
 function compute_L(ws::Workspace)
-    ineq_term = dot(ws.lambda, ws.gval) + dot(ws.mu * (ws.gval .> 0), ws.gval.^2)
-    eq_term = dot(ws.kappa, ws.hval) + ws.nu * sum(ws.hval.^2)
+    ineq_term = dot(ws.lambda_ineq, ws.gval) + sum(psi(t, sigma, ws.mu) for (t, sigma) in zip(ws.gval, ws.lambda_ineq))
+    eq_term = -dot(ws.lambda_eq, ws.hval) + sum(ws.hval.^2) / (2 * ws.mu)
     return ws.fval + ineq_term + eq_term
 end
 
 function compute_Lgrad(ws::Workspace)
-    # NOTE : (Toussaint 2017) forgot including term ws.gval and ws.hval
-    ineq_term = ws.gjac * (ws.lambda + 2 * ws.mu * ws.gval .* (ws.gval .> 0)) 
-    eq_term = ws.hjac * (ws.kappa .+ (2 * ws.nu * ws.hval))
-    return ws.fgrad + eq_term + ineq_term
+    ineq_term = ws.gjac * (ws.lambda_ineq .+ (psi_grad(t, sigma, ws.mu) for (t, sigma) in zip(ws.gval, ws.lambda_ineq)))
+    eq_term = ws.hjac * (-ws.lambda_eq .+ ws.hval/ws.mu)
+    return ws.fgrad + ineq_term + eq_term
 end
 
 function compute_approx_Lhessian(ws::Workspace)
     # NOTE : (Toussaint 2017) forgot multiplying 2
-    ineq_term = 2 * ws.gjac * Diagonal(ws.mu * (ws.gval .> 0)) * ws.gjac'
-    eq_term = 2 * ws.nu * ws.hjac * ws.hjac'
-    return ws.fhessian + ineq_term + eq_term
+    diag = Diagonal([t-sigma/ws.mu for (t, sigma) in zip(ws.gval, ws.lambda_ineq)])
+    ineq_term = 2 * ws.gjac * diag* ws.gjac'/ws.mu
+    eq_term = ws.hjac * ws.hjac'/ws.mu
+    return ws.fhessian + eq_term + ineq_term
+end
+
+struct MaxLineSearchError <: Exception
+    x::Vector{Float64}
+    Lgrad::Vector{Float64}
+    newton_direction::Vector{Float64}
 end
 
 function single_step!(ws::Workspace, x::Vector{Float64}, f, g, h, cfg::Config)
@@ -97,9 +118,12 @@ function single_step!(ws::Workspace, x::Vector{Float64}, f, g, h, cfg::Config)
         L = compute_L(ws)
         Lgrad = compute_Lgrad(ws)
         Lhess = compute_approx_Lhessian(ws)
+        @warn "delete this line"
+        Lhess = Matrix(1.0I, ws.n_dim, ws.n_dim) 
         qm = QuadraticModel(L, Lgrad, Lhess)
         direction = newton_direction(x, qm)
         
+        """
         function numerical_grad(x0)
             ws_ = deepcopy(ws)
             evaluate!(ws_, x0, f, g, h)
@@ -116,25 +140,33 @@ function single_step!(ws::Workspace, x::Vector{Float64}, f, g, h, cfg::Config)
             return grad
         end
         grad = numerical_grad(x)
+        """
+        println(dot(direction, Lgrad))
 
+        counter = 0
         while true # line search
             x_new = x + direction * alpha_newton
             evaluate!(ws, x_new, f, g, h)
             L_new = compute_L(ws)
-            isValidAlpha = L_new < L + cfg.sigma_line_search * dot(Lgrad, alpha_newton * direction)
+            extra = cfg.sigma_line_search * dot(Lgrad, alpha_newton * direction)
+            isValidAlpha = L_new < L + extra
             isValidAlpha && break
             alpha_newton *= cfg.sigma_alpha_update_minus
+            counter += 1
+            if counter > 50
+                throw(MaxLineSearchError(x, Lgrad, direction))
+            end
         end
         dx = alpha_newton * direction
         x += dx
         alpha_newton = min(cfg.sigma_alpha_update_plus * alpha_newton, 1.0)
         maximum(abs.(dx)) < cfg.xtol_internal && break
     end
-    ws.lambda = min.(0, ws.lambda + 2 * ws.mu .* ws.gval) # NOTE : min because g > 0 in our case
-    ws.kappa += 2 * ws.nu * ws.hval
-
+    Lgrad = compute_Lgrad(ws)
+    println(Lgrad)
+    ws.lambda_ineq = max.(0, ws.lambda_ineq - ws.gval/ws.mu)
+    ws.lambda_eq = ws.lambda_eq .- ws.hval/ws.mu
     ws.mu < 1e8 && (ws.mu *= 10)
-    ws.nu < 1e8 && (ws.nu *= 10)
     return x
 end
 
