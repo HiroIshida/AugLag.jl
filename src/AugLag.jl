@@ -1,25 +1,6 @@
 module AugLag
 
-macro debugassert(test)
-  esc(:(if $(@__MODULE__).debugging()
-    @assert($test)
-   end))
-end
-debugging() = false
-
 using LinearAlgebra
-
-function numerical_grad(fun, x0)
-    eps = 1e-7
-    dim = length(x0)
-    grad_numel = zeros(dim)
-    for i in 1:dim
-        x1 = copy(x0)
-        x1[i] += eps
-        grad_numel[i] = (fun(x1) - fun(x0))/eps
-    end
-    return grad_numel
-end
 
 struct QuadraticModel
     f::Float64
@@ -34,193 +15,129 @@ function newton_direction(x::Vector{Float64}, qm::QuadraticModel)
 end
 
 function (qm::QuadraticModel)(x::Vector{Float64})
-    val = transpose(x) * qm.hessian * x + dot(qm.grad, x)  + qm.f
+    val = x' * qm.hessian * x + dot(qm.grad, x)  + qm.f
     grad = 2 * qm.hessian * x + qm.grad
     return val, grad
 end
 
-function psi(t::Float64, sigma::Float64, mu::Float64)
-    if t - sigma/mu < 0.0
-        return - sigma * t + 0.5 * mu * t^2
-    else
-        return - 0.5/mu * sigma^2
-    end
+struct Config
+    xtol_internal::Float64
+    sigma_alpha_update_minus::Float64
+    sigma_alpha_update_plus::Float64
+    sigma_line_search::Float64
+end
+function Config(;
+        xtol_internal=1e-2,
+        sigma_alpha_update_minus=0.5,
+        sigma_alpha_update_plus=1.2,
+        sigma_line_search=0.01)
+    Config(xtol_internal, sigma_alpha_update_minus, sigma_alpha_update_plus, sigma_line_search)
 end
 
-function psi_grad(t::Float64, sigma::Float64, mu::Float64)
-    if t - sigma/mu < 0.0
-        return - sigma + mu * t
-    else
-        return 0.0
-    end
-end
-
-mutable struct AuglagData
-    lambda_ceq::Vector{Float64}
-    lambda_cineq::Vector{Float64}
-    mu_ceq::Float64
-    mu_cineq::Float64
-end
-
-# we will consider a model with quadratic objective function with 
-# general equality and inequality functions
-struct Problem
-    qm::QuadraticModel
-    ceq::Function
-    cineq::Function
-
+mutable struct Workspace
     n_dim::Int
-    n_dim_ceq::Int
-    n_dim_cineq::Int
+    n_ineq::Int
+    n_eq::Int
+    lambda::Vector{Float64} # g dual
+    kappa::Vector{Float64} # h dual
+    mu::Float64 # g penal
+    nu::Float64 # h penal
+
+    # cache
+    fval::Union{Float64, Nothing}
+    fgrad::Union{Vector{Float64}, Nothing}
+    fhessian::Union{Matrix{Float64}, Nothing}
+    gval::Union{Vector{Float64}, Nothing}
+    gjac::Union{Matrix{Float64}, Nothing}
+    hval::Union{Vector{Float64}, Nothing}
+    hjac::Union{Matrix{Float64}, Nothing} 
+end 
+
+function Workspace(n_dim, n_ineq, n_eq) 
+    g_dual = zeros(n_ineq) 
+    h_dual = zeros(n_eq)
+    g_penalty = 1.0
+    h_penalty = 1.0
+    Workspace(n_dim, n_ineq, n_eq, g_dual, h_dual, g_penalty, h_penalty, 
+        nothing, nothing, nothing, nothing, nothing, nothing, nothing)
 end
 
-function gen_init_data(prob::Problem)
-    lambda_ceq = zeros(prob.n_dim_ceq)
-    lambda_cineq = zeros(prob.n_dim_cineq)
-    mu_ceq = 1.0
-    mu_cineq = 1.0
-    AuglagData(lambda_ceq, lambda_cineq, mu_ceq, mu_cineq)
+function evaluate!(ws::Workspace, x, f::QuadraticModel, g, h)
+    ws.fval, ws.fgrad = f(x) 
+    ws.gval, ws.gjac = g(x)
+    ws.hval, ws.hjac = h(x)
+    ws.fhessian = f.hessian
 end
 
-
-struct FuncEvals
-    val_obj::Float64
-    grad_obj::Vector{Float64}
-    val_ceq::Vector{Float64}
-    grad_ceq::Matrix{Float64}
-    val_cineq::Vector{Float64}
-    grad_cineq::Matrix{Float64}
+function compute_L(ws::Workspace)
+    ineq_term = dot(ws.lambda, ws.gval) + dot(ws.mu * (ws.gval .> 0), ws.gval.^2)
+    eq_term = dot(ws.kappa, ws.hval) + ws.nu * sum(ws.hval.^2)
+    return ws.fval + ineq_term + eq_term
 end
 
-function FuncEvals(x::Vector{Float64}, prob::Problem)
-    val_obj, grad_obj = prob.qm(x)
-    val_ceq, grad_ceq = prob.ceq(x)
-    val_cineq, grad_cineq = prob.cineq(x)
-    FuncEvals(val_obj, grad_obj, val_ceq, grad_ceq, val_cineq, grad_cineq)
+function compute_Lgrad(ws::Workspace)
+    # NOTE : (Toussaint 2017) forgot including term ws.gval and ws.hval
+    ineq_term = ws.gjac * (ws.lambda + 2 * ws.mu * ws.gval .* (ws.gval .> 0)) 
+    eq_term = ws.hjac * (ws.kappa .+ (2 * ws.nu * ws.hval))
+    return ws.fgrad + eq_term + ineq_term
 end
 
-function Problem(qm::QuadraticModel, ceq, cineq, n_dim)
-    x_dummy = zeros(n_dim)
-    val_ceq, jac_ceq = ceq(x_dummy)
-    n_dim_ceq = length(val_ceq)
-
-    @assert size(jac_ceq) == (n_dim, n_dim_ceq)
-    val_cineq, jac_cineq = cineq(x_dummy)
-
-    n_dim_cineq = length(val_cineq)
-    @assert size(jac_cineq) == (n_dim, n_dim_cineq)
-
-    Problem(qm, ceq, cineq, n_dim, n_dim_ceq, n_dim_cineq)
+function compute_approx_Lhessian(ws::Workspace)
+    # NOTE : (Toussaint 2017) forgot multiplying 2
+    ineq_term = 2 * ws.gjac * Diagonal(ws.mu * (ws.gval .> 0)) * ws.gjac'
+    eq_term = 2 * ws.nu * ws.hjac * ws.hjac'
+    return ws.fhessian + ineq_term + eq_term
 end
 
-function compute_auglag(prob::Problem, ad::AuglagData, fe::FuncEvals) 
-    # compute function evaluation of the augmented lagrangian
-    val_lag = fe.val_obj
-    for i in 1:prob.n_dim_ceq
-        ineq_lag_mult = ad.lambda_ceq[i] * fe.val_ceq[i]
-        ineq_quadratic_penalty = ad.mu_ceq/2.0 * fe.val_ceq[i]^2
-        val_lag += (- ineq_lag_mult + ineq_quadratic_penalty)
-    end
-    for i in 1:prob.n_dim_cineq
-        val_lag += psi(fe.val_cineq[i], ad.lambda_cineq[i], ad.mu_cineq)
-    end
-    return val_lag
-end
+function single_step!(ws::Workspace, x::Vector{Float64}, f, g, h, cfg::Config)
 
-function compute_auglag_grad(prob::Problem, ad::AuglagData, fe::FuncEvals)
-    # compute gradient of the augmented lagrangian
-    grad_lag = fe.grad_obj
-    for i in 1:prob.n_dim_ceq
-        grad_ineq_lag_mult = ad.lambda_ceq[i] * @views fe.grad_ceq[:, i]
-        grad_ineq_quadratic_penalty = ad.mu_ceq/2.0 * 2 * fe.val_ceq[i] * @views fe.grad_ceq[:, i]
-        grad_lag += (- grad_ineq_lag_mult + grad_ineq_quadratic_penalty)
-    end
-    for i in 1:prob.n_dim_cineq
-        grad_lag += psi_grad(fe.val_cineq[i], ad.lambda_cineq[i], ad.mu_cineq) * @views fe.grad_cineq[:, i]
-    end
-    return grad_lag
-end
-
-function compute_auglag_approximate_hessian(prob::Problem, ad::AuglagData, fe::FuncEvals)
-    approx_hessian = prob.qm.hessian
-    # TODO a matrix created by vec^T * vec can be expressed in a better data structure
-    for i in 1:prob.n_dim_ceq
-        approx_hessian += 0.5 * ad.mu_ceq * @views fe.grad_ceq[:, i] * transpose(@views fe.grad_ceq[:, i])
-    end
-    for i in 1:prob.n_dim_cineq
-        approx_hessian += 0.5 * ad.mu_cineq * @views fe.grad_cineq[:, i] * transpose(@views fe.grad_cineq[:, i]) 
-    end
-    return approx_hessian
-end
-
-function compute_auglag_numerical_hessian(x::Vector{Float64}, prob::Problem, ad::AuglagData)
-    x0 = x
-    fe0 = FuncEvals(x, prob)
-    grad_lag0 = compute_auglag_grad(prob, ad, fe0)
-
-    dim = length(x0)
-    H = zeros(dim, dim)
-    eps = 1e-7
-    for i in 1:length(x)
-        x1 = copy(x0)
-        x1[i] += eps
-        fe1 = FuncEvals(x1, prob)
-        grad_lag1 = compute_auglag_grad(prob, ad, fe1)
-        H[:, i] = (grad_lag1 - grad_lag0)/eps
-    end
-    return H
-end
-
-function step_auglag(x::Vector{Float64}, prob::Problem, ad::AuglagData, xtol_internal::Float64)
     alpha_newton = 1.0
-    sigma_alpha_update_minus = 0.5
-    sigma_alpha_update_plus = 1.2
-    sigma_line_search = 0.01
-
-    while true
-        fe = FuncEvals(x, prob)
-        # newton step
-        val_lag = compute_auglag(prob, ad, fe)
-        grad_lag = compute_auglag_grad(prob, ad, fe)
-        hessian_lag_approx = compute_auglag_approximate_hessian(prob, ad, fe)
-
-        # compute approx hessian
-        qm = QuadraticModel(val_lag, grad_lag, hessian_lag_approx)
+    while true # LM newton method
+        evaluate!(ws, x, f, g, h)
+        L = compute_L(ws)
+        Lgrad = compute_Lgrad(ws)
+        Lhess = compute_approx_Lhessian(ws)
+        qm = QuadraticModel(L, Lgrad, Lhess)
         direction = newton_direction(x, qm)
-        if norm(direction) > 0
-            @debugassert dot(direction, grad_lag) < 0
+        
+        function numerical_grad(x0)
+            ws_ = deepcopy(ws)
+            evaluate!(ws_, x0, f, g, h)
+            L0 = compute_L(ws_)
+            eps = 1e-7
+            grad = zeros(ws_.n_dim)
+            for i in 1:ws_.n_dim
+                x1 = copy(x0)
+                x1[i] += eps
+                evaluate!(ws_, x1, f, g, h)
+                L1 = compute_L(ws_)
+                grad[i] = (L1 - L0)/eps
+            end
+            return grad
         end
+        grad = numerical_grad(x)
 
-        while true
+        while true # line search
             x_new = x + direction * alpha_newton
-            fe_new = FuncEvals(x_new, prob)
-            val_lag_new = compute_auglag(prob, ad, fe_new)
-
-            isValidAlpha = val_lag_new < val_lag + sigma_line_search * dot(grad_lag, alpha_newton * direction)
+            evaluate!(ws, x_new, f, g, h)
+            L_new = compute_L(ws)
+            isValidAlpha = L_new < L + cfg.sigma_line_search * dot(Lgrad, alpha_newton * direction)
             isValidAlpha && break
-            alpha_newton *= sigma_alpha_update_minus
+            alpha_newton *= cfg.sigma_alpha_update_minus
         end
         dx = alpha_newton * direction
         x += dx
-        alpha_newton = min(sigma_alpha_update_plus * alpha_newton, 1.0)
-        maximum(abs.(dx)) < xtol_internal && break
+        alpha_newton = min(cfg.sigma_alpha_update_plus * alpha_newton, 1.0)
+        maximum(abs.(dx)) < cfg.xtol_internal && break
     end
+    ws.lambda = min.(0, ws.lambda + 2 * ws.mu .* ws.gval) # NOTE : min because g > 0 in our case
+    ws.kappa += 2 * ws.nu * ws.hval
 
-    val_obj, grad_obj = prob.qm(x)
-    val_ceq, grad_ceq = prob.ceq(x)
-    val_cineq, grad_cineq = prob.cineq(x)
-    for j in 1:prob.n_dim_ceq
-        ad.lambda_ceq[j] -= ad.mu_ceq * val_ceq[j]
-    end
-    for j in 1:prob.n_dim_cineq
-        ad.lambda_cineq[j] = max(0.0, ad.lambda_cineq[j] - ad.mu_cineq * val_cineq[j])
-    end
-
-    ad.mu_ceq < 1e8 && (ad.mu_ceq *= 10.0)
-    ad.mu_cineq < 1e8 && (ad.mu_cineq *= 10.0)
+    ws.mu < 1e8 && (ws.mu *= 10)
+    ws.nu < 1e8 && (ws.nu *= 10)
     return x
 end
 
-export QuadraticModel, AuglagData, Problem, compute_auglag, gen_init_data, step_auglag
+export QuadraticModel, Workspace, Config, single_step!
 
-end # module
+end

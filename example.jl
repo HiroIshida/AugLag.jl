@@ -4,8 +4,6 @@ using LinearAlgebra
 using BenchmarkTools
 using NLopt
 
-AugLag.debugging() = true
-
 function eq_const(x::Vector{Float64})
     val = (x[1] - 1.0)^2 - x[2]
     grad = transpose([2 * (x[1] - 1.0) -1.0;])
@@ -59,19 +57,18 @@ end
 
 function main()
     qm = QuadraticModel(0.0, [0, 0], Diagonal([1, 1.]))
-    prob = Problem(qm, eq_const, ineq_const, 2)
-    x_opt = [2.0, 2.0]
-    internal_data = gen_init_data(prob)
-    xtol = 1e-6
-    for i in 1:20
-        x_opt_pre = x_opt
-        x_opt = step_auglag(x_opt, prob, internal_data, xtol)
-        if maximum(abs.(x_opt - x_opt_pre)) < xtol
-            break
-        end
+    x = [2.0, 2.0]
+    ws = Workspace(2, 1, 1)
+    cfg = Config()
+    for i in 1:8
+        x = single_step!(ws, x, qm, ineq_const, eq_const, cfg)
     end
+    println(x)
 end
+main()
+"""
 println("testing auglag")
 @benchmark main()
 println("testing nlopt slsqp")
 @benchmark nlopt_main()
+"""
