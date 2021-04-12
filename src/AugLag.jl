@@ -85,21 +85,21 @@ function psi_grad(t::Float64, sigma::Float64, mu::Float64)
 end
 
 function compute_L(ws::Workspace)
-    ineq_term = dot(ws.lambda_ineq, ws.gval) + sum(psi(t, sigma, ws.mu) for (t, sigma) in zip(ws.gval, ws.lambda_ineq))
+    ineq_term = sum([psi(t, sigma, ws.mu) for (t, sigma) in zip(ws.gval, ws.lambda_ineq)])
     eq_term = -dot(ws.lambda_eq, ws.hval) + sum(ws.hval.^2) / (2 * ws.mu)
-    return ws.fval + ineq_term + eq_term
+    return ws.fval + eq_term  + ineq_term
 end
 
 function compute_Lgrad(ws::Workspace)
-    ineq_term = ws.gjac * (ws.lambda_ineq .+ (psi_grad(t, sigma, ws.mu) for (t, sigma) in zip(ws.gval, ws.lambda_ineq)))
+    ineq_term = ws.gjac * [psi_grad(t, sigma, ws.mu) for (t, sigma) in zip(ws.gval, ws.lambda_ineq)]
     eq_term = ws.hjac * (-ws.lambda_eq .+ ws.hval/ws.mu)
-    return ws.fgrad + ineq_term + eq_term
+    return ws.fgrad + eq_term + ineq_term
 end
 
 function compute_approx_Lhessian(ws::Workspace)
     # NOTE : (Toussaint 2017) forgot multiplying 2
-    diag = Diagonal([t-sigma/ws.mu for (t, sigma) in zip(ws.gval, ws.lambda_ineq)])
-    ineq_term = 2 * ws.gjac * diag* ws.gjac'/ws.mu
+    diag = Diagonal([(t-sigma/ws.mu < 0.0) * (1.0/ws.mu) for (t, sigma) in zip(ws.gval, ws.lambda_ineq)])
+    ineq_term = ws.gjac * diag* ws.gjac'
     eq_term = ws.hjac * ws.hjac'/ws.mu
     return ws.fhessian + eq_term + ineq_term
 end
@@ -110,7 +110,8 @@ struct MaxLineSearchError <: Exception
     newton_direction::Vector{Float64}
 end
 
-function single_step!(ws::Workspace, x::Vector{Float64}, f, g, h, cfg::Config)
+function single_step!(ws::Workspace, x::Vector{Float64}, f, g, h, cfg::Config; debug=false)
+    println("enter")
 
     alpha_newton = 1.0
     while true # LM newton method
@@ -118,12 +119,9 @@ function single_step!(ws::Workspace, x::Vector{Float64}, f, g, h, cfg::Config)
         L = compute_L(ws)
         Lgrad = compute_Lgrad(ws)
         Lhess = compute_approx_Lhessian(ws)
-        @warn "delete this line"
-        Lhess = Matrix(1.0I, ws.n_dim, ws.n_dim) 
         qm = QuadraticModel(L, Lgrad, Lhess)
         direction = newton_direction(x, qm)
         
-        """
         function numerical_grad(x0)
             ws_ = deepcopy(ws)
             evaluate!(ws_, x0, f, g, h)
@@ -139,9 +137,6 @@ function single_step!(ws::Workspace, x::Vector{Float64}, f, g, h, cfg::Config)
             end
             return grad
         end
-        grad = numerical_grad(x)
-        """
-        println(dot(direction, Lgrad))
 
         counter = 0
         while true # line search
@@ -160,13 +155,15 @@ function single_step!(ws::Workspace, x::Vector{Float64}, f, g, h, cfg::Config)
         dx = alpha_newton * direction
         x += dx
         alpha_newton = min(cfg.sigma_alpha_update_plus * alpha_newton, 1.0)
-        maximum(abs.(dx)) < cfg.xtol_internal && break
+        if maximum(abs.(Lgrad)) < 0.1
+            break
+        end
     end
     Lgrad = compute_Lgrad(ws)
-    println(Lgrad)
     ws.lambda_ineq = max.(0, ws.lambda_ineq - ws.gval/ws.mu)
     ws.lambda_eq = ws.lambda_eq .- ws.hval/ws.mu
-    ws.mu < 1e8 && (ws.mu *= 10)
+    ws.mu > 1e-5 && (ws.mu *= 0.5)
+
     return x
 end
 
