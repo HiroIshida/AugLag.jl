@@ -2,24 +2,13 @@ module AugLag
 
 using LinearAlgebra
 
-struct QuadraticModel
-    f::Float64
-    grad::Vector{Float64}
-    hessian::Matrix{Float64}
-end
+include("funcmodels.jl")
 
 function newton_direction(x::Vector{Float64}, qm::QuadraticModel)
     param_damping = 1.0 # Levenberg–Marquardt damping
-    d = - (qm.hessian .+ param_damping)\qm.grad
+    d = - (hessian(qm) .+ param_damping)\qm.grad
     return d
 end
-
-function (qm::QuadraticModel)(x::Vector{Float64})
-    val = x' * qm.hessian * x + dot(qm.grad, x)  + qm.f
-    grad = 2 * qm.hessian * x + qm.grad
-    return val, grad
-end
-
 
 struct Config
     xtol_internal::Float64
@@ -104,6 +93,32 @@ function compute_approx_Lhessian(ws::Workspace)
     return ws.fhessian + eq_term + ineq_term
 end
 
+function compute_exact_Lhessian(ws_::Workspace, x, f, g, h)
+    eps = 1e-7
+    ws = deepcopy(ws_) # to keep ws intact
+    func(x) = (evaluate!(ws, x, f, g, h); compute_L(ws))
+
+    function dfunc(func, x, i)
+        dx = zeros(ws.n_dim)
+        dx[i] = eps
+        return (func(x + dx) - func(x))/eps
+    end
+
+    function ddfunc(func, x, i, j)
+        dx = zeros(ws.n_dim)
+        dx[i] = eps
+        return dfunc((x)->dfunc(func, x, j), x, i)
+    end
+
+    hess = zeros(ws.n_dim, ws.n_dim)
+    for i in ws.n_dim
+        for j in ws.n_dim
+            hess[i, j] = ddfunc(func, x, i, j)
+        end
+    end
+    return hess
+end
+
 struct MaxLineSearchError <: Exception
     x::Vector{Float64}
     Lgrad::Vector{Float64}
@@ -119,6 +134,7 @@ function single_step!(ws::Workspace, x::Vector{Float64}, f, g, h, cfg::Config; d
         L = compute_L(ws)
         Lgrad = compute_Lgrad(ws)
         Lhess = compute_approx_Lhessian(ws)
+        #Lhess = compute_exact_Lhessian(ws, x, f, g, h)
         qm = QuadraticModel(L, Lgrad, Lhess)
         direction = newton_direction(x, qm)
         
@@ -155,14 +171,11 @@ function single_step!(ws::Workspace, x::Vector{Float64}, f, g, h, cfg::Config; d
         dx = alpha_newton * direction
         x += dx
         alpha_newton = min(cfg.sigma_alpha_update_plus * alpha_newton, 1.0)
-        if maximum(abs.(Lgrad)) < 0.1
-            break
-        end
+        norm(Lgrad) < 0.01 && break
     end
-    Lgrad = compute_Lgrad(ws)
     ws.lambda_ineq = max.(0, ws.lambda_ineq - ws.gval/ws.mu)
     ws.lambda_eq = ws.lambda_eq .- ws.hval/ws.mu
-    ws.mu > 1e-5 && (ws.mu *= 0.5)
+    ws.mu > 1e-6 && (ws.mu *= 0.9) # Toussaint's rai sets 0.2
 
     return x
 end
