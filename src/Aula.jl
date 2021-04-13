@@ -1,4 +1,4 @@
-module AugLag
+module Aula
 
 using LinearAlgebra
 

@@ -1,6 +1,6 @@
 using Test
 using Revise
-using AugLag
+using Aula
 using LinearAlgebra
 using BenchmarkTools
 using NLopt
@@ -22,8 +22,8 @@ function debug_plot(ws::Workspace, b_min, b_max, f, g, h, x, Lgrad, newton_direc
     xlin = range(b_min[1], b_max[1], length=100)
     ylin = range(b_min[2], b_max[2], length=100)
     function func(vec)
-        AugLag.evaluate!(ws, vec, f, g, h)
-        return AugLag.compute_L(ws)
+        Aula.evaluate!(ws, vec, f, g, h)
+        return Aula.compute_L(ws)
     end
     fs = [func([x, y]) for x in xlin, y in ylin]
     PyPlot.contourf(xlin, ylin, fs')
