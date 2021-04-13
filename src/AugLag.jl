@@ -59,15 +59,15 @@ end
 
 function psi(t::Float64, sigma::Float64, mu::Float64)
     if t - sigma/mu < 0.0
-        return - sigma * t + 0.5 * mu * t^2
+        return - sigma * t + 0.5 * t^2 / mu
     else
-        return - 0.5/mu * sigma^2
+        return - 0.5 * mu * sigma^2
     end
 end
 
 function psi_grad(t::Float64, sigma::Float64, mu::Float64)
     if t - sigma/mu < 0.0
-        return - sigma + mu * t
+        return - sigma + t/mu
     else
         return 0.0
     end
@@ -175,7 +175,7 @@ function single_step!(ws::Workspace, x::Vector{Float64}, f, g, h, cfg::Config; d
     end
     ws.lambda_ineq = max.(0, ws.lambda_ineq - ws.gval/ws.mu)
     ws.lambda_eq = ws.lambda_eq .- ws.hval/ws.mu
-    ws.mu > 1e-6 && (ws.mu *= 0.9) # Toussaint's rai sets 0.2
+    ws.mu > 1e-6 && (ws.mu *= 0.2) # Toussaint's rai sets 0.2
 
     return x
 end
