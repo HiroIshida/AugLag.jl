@@ -17,6 +17,7 @@ struct Config
     sigma_line_search::Float64
     mu_minimum::Float64
     dx_threshold::Float64
+    max_line_search_itr::Int
 end
 function Config(;
         xtol_internal=1e-2,
@@ -24,9 +25,10 @@ function Config(;
         sigma_alpha_update_plus=1.2,
         sigma_line_search=0.01,
         mu_minimum=1e-6,
-        dx_threshold=1e-6)
+        dx_threshold=1e-6,
+        max_line_search_itr=20)
     Config(xtol_internal, sigma_alpha_update_minus, sigma_alpha_update_plus, sigma_line_search, 
-        mu_minimum, dx_threshold)
+        mu_minimum, dx_threshold, max_line_search_itr)
 end
 
 mutable struct Workspace
@@ -131,6 +133,7 @@ function compute_exact_Lhessian(ws_::Workspace, x, f, g, h)
 end
 
 struct MaxLineSearchError <: Exception
+    msg::String
     x::Vector{Float64}
     Lgrad::Vector{Float64}
     newton_direction::Vector{Float64}
@@ -147,7 +150,7 @@ function single_step!(ws::Workspace, x::Vector{Float64}, f, g, h, cfg::Config)
         qm = QuadraticModel(L, Lgrad, Lhess)
         direction = newton_direction(x, qm)
         
-        while true # line search
+        for i in 1:cfg.max_line_search_itr
             x_new = x + direction * alpha_newton
             evaluate!(ws, x_new, f, g, h)
             L_new = compute_L(ws)
@@ -155,6 +158,11 @@ function single_step!(ws::Workspace, x::Vector{Float64}, f, g, h, cfg::Config)
             isValidAlpha = L_new < L + extra
             isValidAlpha && break
             alpha_newton *= cfg.sigma_alpha_update_minus
+
+            # error
+            if i==cfg.max_line_search_itr
+                throw(MaxLineSearchError(x, Lgrad, direction))
+            end
         end
         dx = alpha_newton * direction
         x += dx
