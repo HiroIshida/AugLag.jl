@@ -16,14 +16,17 @@ struct Config
     sigma_alpha_update_plus::Float64
     sigma_line_search::Float64
     mu_minimum::Float64
+    dx_threshold::Float64
 end
 function Config(;
         xtol_internal=1e-2,
         sigma_alpha_update_minus=0.5,
         sigma_alpha_update_plus=1.2,
         sigma_line_search=0.01,
-        mu_minimum=1e-6)
-    Config(xtol_internal, sigma_alpha_update_minus, sigma_alpha_update_plus, sigma_line_search, mu_minimum)
+        mu_minimum=1e-6,
+        dx_threshold=1e-6)
+    Config(xtol_internal, sigma_alpha_update_minus, sigma_alpha_update_plus, sigma_line_search, 
+        mu_minimum, dx_threshold)
 end
 
 mutable struct Workspace
@@ -35,6 +38,7 @@ mutable struct Workspace
     mu::Float64 # g penal
 
     # cache
+    dx_cache::Union{Vector{Float64}, Nothing}
     fval::Union{Float64, Nothing}
     fgrad::Union{Vector{Float64}, Nothing}
     fhessian::Union{Matrix{Float64}, Nothing}
@@ -49,11 +53,12 @@ function Workspace(n_dim, n_ineq, n_eq)
     h_dual = zeros(n_eq)
     mu = 1.0
     Workspace(n_dim, n_ineq, n_eq, g_dual, h_dual, mu, 
-        nothing, nothing, nothing, nothing, nothing, nothing, nothing)
+        nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing)
 end
 
 function shoud_abort(ws::Workspace, cfg::Config)
     ws.mu < cfg.mu_minimum && (return true)
+    norm(ws.dx_cache) < cfg.dx_threshold && (return true)
     return false
 end
 
@@ -93,7 +98,6 @@ function compute_Lgrad(ws::Workspace)
 end
 
 function compute_approx_Lhessian(ws::Workspace)
-    # NOTE : (Toussaint 2017) forgot multiplying 2
     diag = Diagonal([(t-sigma/ws.mu < 0.0) * (1.0/ws.mu) for (t, sigma) in zip(ws.gval, ws.lambda_ineq)])
     ineq_term = ws.gjac * diag* ws.gjac'
     eq_term = ws.hjac * ws.hjac'/ws.mu
@@ -133,7 +137,7 @@ struct MaxLineSearchError <: Exception
 end
 
 function single_step!(ws::Workspace, x::Vector{Float64}, f, g, h, cfg::Config)
-
+    x0 = copy(x)
     alpha_newton = 1.0
     while true # LM newton method
         evaluate!(ws, x, f, g, h)
@@ -160,6 +164,7 @@ function single_step!(ws::Workspace, x::Vector{Float64}, f, g, h, cfg::Config)
     ws.lambda_ineq = max.(0, ws.lambda_ineq - ws.gval/ws.mu)
     ws.lambda_eq = ws.lambda_eq .- ws.hval/ws.mu
     ws.mu > cfg.mu_minimum && (ws.mu *= 0.2) # Toussaint's rai sets 0.2
+    ws.dx_cache = x - x0
     return x
 end
 
