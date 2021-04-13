@@ -133,10 +133,8 @@ function compute_exact_Lhessian(ws_::Workspace, x, f, g, h)
 end
 
 struct MaxLineSearchError <: Exception
-    msg::String
-    x::Vector{Float64}
-    Lgrad::Vector{Float64}
-    newton_direction::Vector{Float64}
+    Lgrad_norm::Float64
+    newton_direction_norm::Float64
 end
 
 function single_step!(ws::Workspace, x::Vector{Float64}, f, g, h, cfg::Config)
@@ -161,7 +159,7 @@ function single_step!(ws::Workspace, x::Vector{Float64}, f, g, h, cfg::Config)
 
             # error
             if i==cfg.max_line_search_itr
-                throw(MaxLineSearchError(x, Lgrad, direction))
+                throw(MaxLineSearchError(norm(Lgrad), norm(direction)))
             end
         end
         dx = alpha_newton * direction
