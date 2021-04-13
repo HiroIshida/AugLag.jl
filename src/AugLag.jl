@@ -15,13 +15,15 @@ struct Config
     sigma_alpha_update_minus::Float64
     sigma_alpha_update_plus::Float64
     sigma_line_search::Float64
+    mu_minimum::Float64
 end
 function Config(;
         xtol_internal=1e-2,
         sigma_alpha_update_minus=0.5,
         sigma_alpha_update_plus=1.2,
-        sigma_line_search=0.01)
-    Config(xtol_internal, sigma_alpha_update_minus, sigma_alpha_update_plus, sigma_line_search)
+        sigma_line_search=0.01,
+        mu_minimum=1e-6)
+    Config(xtol_internal, sigma_alpha_update_minus, sigma_alpha_update_plus, sigma_line_search, mu_minimum)
 end
 
 mutable struct Workspace
@@ -48,6 +50,11 @@ function Workspace(n_dim, n_ineq, n_eq)
     mu = 1.0
     Workspace(n_dim, n_ineq, n_eq, g_dual, h_dual, mu, 
         nothing, nothing, nothing, nothing, nothing, nothing, nothing)
+end
+
+function shoud_abort(ws::Workspace, cfg::Config)
+    ws.mu < cfg.mu_minimum && (return true)
+    return false
 end
 
 function evaluate!(ws::Workspace, x, f::QuadraticModel, g, h)
@@ -125,8 +132,7 @@ struct MaxLineSearchError <: Exception
     newton_direction::Vector{Float64}
 end
 
-function single_step!(ws::Workspace, x::Vector{Float64}, f, g, h, cfg::Config; debug=false)
-    println("enter")
+function single_step!(ws::Workspace, x::Vector{Float64}, f, g, h, cfg::Config)
 
     alpha_newton = 1.0
     while true # LM newton method
@@ -134,27 +140,9 @@ function single_step!(ws::Workspace, x::Vector{Float64}, f, g, h, cfg::Config; d
         L = compute_L(ws)
         Lgrad = compute_Lgrad(ws)
         Lhess = compute_approx_Lhessian(ws)
-        #Lhess = compute_exact_Lhessian(ws, x, f, g, h)
         qm = QuadraticModel(L, Lgrad, Lhess)
         direction = newton_direction(x, qm)
         
-        function numerical_grad(x0)
-            ws_ = deepcopy(ws)
-            evaluate!(ws_, x0, f, g, h)
-            L0 = compute_L(ws_)
-            eps = 1e-7
-            grad = zeros(ws_.n_dim)
-            for i in 1:ws_.n_dim
-                x1 = copy(x0)
-                x1[i] += eps
-                evaluate!(ws_, x1, f, g, h)
-                L1 = compute_L(ws_)
-                grad[i] = (L1 - L0)/eps
-            end
-            return grad
-        end
-
-        counter = 0
         while true # line search
             x_new = x + direction * alpha_newton
             evaluate!(ws, x_new, f, g, h)
@@ -163,10 +151,6 @@ function single_step!(ws::Workspace, x::Vector{Float64}, f, g, h, cfg::Config; d
             isValidAlpha = L_new < L + extra
             isValidAlpha && break
             alpha_newton *= cfg.sigma_alpha_update_minus
-            counter += 1
-            if counter > 50
-                throw(MaxLineSearchError(x, Lgrad, direction))
-            end
         end
         dx = alpha_newton * direction
         x += dx
@@ -175,11 +159,10 @@ function single_step!(ws::Workspace, x::Vector{Float64}, f, g, h, cfg::Config; d
     end
     ws.lambda_ineq = max.(0, ws.lambda_ineq - ws.gval/ws.mu)
     ws.lambda_eq = ws.lambda_eq .- ws.hval/ws.mu
-    ws.mu > 1e-6 && (ws.mu *= 0.2) # Toussaint's rai sets 0.2
-
+    ws.mu > cfg.mu_minimum && (ws.mu *= 0.2) # Toussaint's rai sets 0.2
     return x
 end
 
-export QuadraticModel, Workspace, Config, single_step!
+export QuadraticModel, Workspace, Config, single_step!, shoud_abort
 
 end

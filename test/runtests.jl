@@ -1,9 +1,9 @@
+using Revise
 using AugLag
 using LinearAlgebra
 using Test
 import JSON
 
-AugLag.debugging() = true
 
 # the test data set (mpc.json) is created using 
 # https://github.com/HiroIshida/robust-tube-mpc
@@ -45,20 +45,18 @@ function solve_mpc()
         return val, transpose(grad)
     end
 
-    prob = Problem(qm, eq_const, ineq_const, dim)
-    x_opt = zeros(dim)
-    internal_data = gen_init_data(prob)
+    x = zeros(dim)
+    ws = Workspace(dim, length(C_ineq2), length(C_eq2))
+    cfg = Config()
 
     xtol = 1e-6
-    while true
-        x_opt_pre = x_opt
-        x_opt = step_auglag(x_opt, prob, internal_data, xtol)
-        if maximum(abs.(x_opt - x_opt_pre)) < xtol
-            println("converged")
-            break
-        end
+    for i in 1:20
+        x = single_step!(ws, x, qm, ineq_const, eq_const, cfg)
+        shoud_abort(ws, cfg) && break
     end
-    @test maximum(abs.(x_opt - sol)) < 1e-4
+    println(x - sol)
+    println(ineq_const(x))
+    @test maximum(abs.(x - sol)) < 1e-4
     println("mpc solved")
 end
 solve_mpc()
