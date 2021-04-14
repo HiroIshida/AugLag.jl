@@ -5,8 +5,9 @@ using LinearAlgebra
 include("funcmodels.jl")
 
 function newton_direction(x::Vector{Float64}, qm::QuadraticModel)
-    param_damping = 1.0 # Levenberg–Marquardt damping
-    d = - (hessian(qm) .+ param_damping)\qm.grad
+    dim = length(x)
+    param_damping = 10.0 # Levenberg–Marquardt damping
+    d = - (hessian(qm) .+ param_damping * Diagonal(ones(dim)))\qm.grad
     return d
 end
 
